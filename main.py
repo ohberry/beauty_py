@@ -1,38 +1,24 @@
+import json
 import os
+import random
 import re
 import time
 from contextlib import asynccontextmanager
 
-import aiohttp
-import asyncio
+import execjs
 from fastapi import FastAPI, BackgroundTasks, Form, Request
 from fastapi.responses import JSONResponse
 import redis.asyncio as redis
 import uvicorn
-
 from XB import XBogus
 from configobj import ConfigObj
 from loguru import logger
-from rich.progress import Progress, TextColumn, BarColumn, DownloadColumn, TransferSpeedColumn, TimeRemainingColumn
-from rich import print
-
-progress = Progress(
-    TextColumn("[bold blue]{task.fields[filename]}", justify="right"),
-    BarColumn(bar_width=None),
-    "[progress.percentage]{task.percentage:>3.1f}%",
-    "•",
-    DownloadColumn(),
-    "•",
-    TransferSpeedColumn(),
-    "•",
-    TimeRemainingColumn(),
-)
-
+import requests
+from datetime import datetime
 
 xb = XBogus()
 
 redis_client: redis.client.Redis
-client_session: aiohttp.ClientSession
 ini = ConfigObj('conf.ini', encoding="UTF8")
 
 dy_headers = {
@@ -41,6 +27,50 @@ dy_headers = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/104.0.0.0 '
                   'Safari/537.36'
 }
+
+js = execjs.compile(open(r'./info.js', 'r', encoding='utf-8').read())
+
+xhs_headers = {
+    "authority": "edith.xiaohongshu.com",
+    "accept": "application/json, text/plain, */*",
+    "accept-language": "zh-CN,zh;q=0.9,en;q=0.8,en-GB;q=0.7,en-US;q=0.6",
+    "content-type": "application/json;charset=UTF-8",
+    "origin": "https://www.xiaohongshu.com",
+    "referer": "https://www.xiaohongshu.com/",
+    "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "x-s": "",
+    "x-t": "",
+}
+
+page_params = {
+    "num": "30",
+    "cursor": "",
+    "user_id": "",
+    "image_scenes": ""
+}
+note_body = {
+    "source_note_id": '',
+    "image_scenes": [
+        "CRD_PRV_WEBP",
+        "CRD_WM_WEBP"
+    ]
+}
+
+xhs_img_cdns = [
+    "https://sns-img-qc.xhscdn.com",
+    "https://sns-img-hw.xhscdn.com",
+    "https://sns-img-bd.xhscdn.com",
+    "https://sns-img-qn.xhscdn.com",
+]
+
+xhs_video_cdns = [
+    # "https://sns-video-qc.xhscdn.com",
+    "https://sns-video-hw.xhscdn.com",
+    "https://sns-video-bd.xhscdn.com",
+    "https://sns-video-qn.xhscdn.com",
+]
+
+more_url = 'https://edith.xiaohongshu.com/api/sns/web/v1/user_posted'
 
 # 抖音作品类型
 video_type = (0, 4, 51, 53, 55, 58, 61, 66, 109)
@@ -56,9 +86,16 @@ logger.add('xhs_{time:%Y%m%d}_error.log', level="ERROR", rotation='1 day',
            encoding='utf-8', filter=lambda record: record["level"].name == "ERROR")
 
 
-class UnicornException(Exception):
-    def __init__(self, name: str):
-        self.name = name
+def cookie_to_dict(cookie_str):
+    # 过滤掉空格，空格可能有多个
+    cookie_str = cookie_str.replace(' ', '')
+    d = {item.split('=')[0]: item.split('=')[1] for item in cookie_str.split(';')}
+    if 'name' in d:
+        del d['abRequestId']
+    return d
+
+
+xhs_cookie = cookie_to_dict(ini['xhsCookie'])
 
 
 class RedisTemplate:
@@ -78,23 +115,11 @@ async def lifespan(app: FastAPI):
     pool = redis.ConnectionPool.from_url("redis://localhost:3278/0")
     redis_client = redis.Redis.from_pool(pool)
 
-    global client_session
-    client_session = aiohttp.ClientSession()
-
     yield
     await redis_client.close()
-    await client_session.close()
 
 
 app = FastAPI(lifespan=lifespan)
-
-
-@app.exception_handler(UnicornException)
-async def unicorn_exception_handler(request: Request, exc: UnicornException):
-    return JSONResponse(
-        status_code=400,
-        content={"message": exc.name},
-    )
 
 
 @app.exception_handler(Exception)
@@ -106,21 +131,30 @@ async def general_exception_handler(request: Request, exc: Exception):
 
 
 async def download(url, path, work_id):
-    for i in range(3):
-        async with client_session.get(url, cookies=None) as response:
-            if response.status != 200:
-                if i == 2:
-                    logger.error(f'{url}-请求作品信息失败,状态码：{response}')
+    code = 200
+    try:
+        for i in range(3):
+            resp = requests.get(url, timeout=20, stream=True)
+            code = resp.status_code
+            if code != 200:
+                if code != 429:
+                    logger.error(f"下载请求异常，状态码: {resp.status_code}")
                     return
-            else:
-                with open(path, 'wb') as f:
-                    while True:
-                        chunk = await response.content.read(1024)
-                        if not chunk:
-                            break
-                        f.write(chunk)
-                logger.info(f'have downloaded {url} 作品id：{work_id} {path}')
-                break
+                else:
+                    if i == 2:
+                        logger.error(f"下载请求异常，状态码: {resp.status_code}")
+                        return
+                    logger.error(f"第{i + 1}次尝试：下载失败 {url} {path}")
+                    time.sleep(3)
+                    continue
+            with open(path, 'wb') as f:
+                for chunk in resp.iter_content(chunk_size=8192):
+                    if not chunk:
+                        break
+                    f.write(chunk)
+            logger.info(f'have downloaded {url} 作品id：{work_id} {path}')
+    except Exception as e:
+        logger.error(f'下载失败，{url} {path}: {e}')
 
 
 async def handle_monitor_task(link: str, cursor: str = None):
@@ -143,29 +177,37 @@ async def handle_dy(sec_uid: str, max_cursor: str):
         post_params = xb.getXBogus(f'aid=6383&sec_user_id'
                                    f'={sec_uid}&count=20&max_cursor={max_cursor}&cookie_enabled=true'
                                    '&platform=PC&downlink=10')
+        response = None
         for i in range(3):
-            async with client_session.get(f'https://www.douyin.com/aweme/v1/web/aweme/post/?{post_params}',
-                                          headers=dy_headers) as response:
-                if response.status == 429:
+            response = requests.get(f'https://www.douyin.com/aweme/v1/web/aweme/post/?{post_params}',
+                                    headers=dy_headers)
+            if response.status_code == 429:
+                if i < 2:
                     time.sleep(3)
-                    if i < 2:
-                        continue
-                if response.status != 200 or response.text == '':
-                    logger.error(f'{sec_uid}-请求作品信息失败,状态码：{response}')
-                    return
-                if response.status == 200:
-                    awemes = await response.json()
-                    break
+                    continue
+            if response.status_code != 200 or response.text == '':
+                logger.error(f'{sec_uid}-请求作品列表信息失败,状态码：{response}')
+                return
+            if response.status_code == 200:
+                break
+        awemes = response.json()
         if not awemes:
             logger.error(f'{sec_uid}-请求作品信息失败,请检查用户是否异常或者请求频繁导致cookie被ban')
+            return
+
         if awemes['status_code'] != 0:
-            logger.error(f'{sec_uid}-作品信息接口返回不正常,状态码：{awemes["status_code"]}')
+            logger.error(f'{sec_uid}-请求成功，但接口返回不正常,接口返回码：{awemes["status_code"]}')
+            return
 
         has_more = awemes['has_more']
+        if not has_more:
+            logger.info(f'{sec_uid}-接口返回异常，无其他数据')
+            return
+
         aweme_list = awemes['aweme_list']
         max_cursor = awemes['max_cursor']
         if not aweme_list:
-            time.sleep(5)
+            time.sleep(3)
             continue
         aweme = aweme_list[0]
         author = aweme['author']
@@ -177,6 +219,8 @@ async def handle_dy(sec_uid: str, max_cursor: str):
             local_latest_time = await RedisTemplate.get(f'{sec_uid}')
             if not local_latest_time:
                 local_latest_time = 0
+            else:
+                local_latest_time = int(local_latest_time)
             if not os.path.exists(base_path):
                 os.makedirs(base_path)
         for index, aweme in enumerate(aweme_list):
@@ -214,8 +258,87 @@ async def handle_dy(sec_uid: str, max_cursor: str):
     logger.info(f'{sec_uid}到底了')
 
 
+def handle_xhs(user_id, cursor=''):
+    has_more = True
+    while has_more:
+        logger.info(f"{user_id}-{cursor}页 开始下载")
+        api = f"/api/sns/web/v1/user_posted?num=30&cursor={cursor}&user_id={user_id}&image_scenes="
+        ret = js.call('get_xs', api, '', xhs_cookie['a1'])
+        xhs_headers['x-s'], xhs_headers['x-t'] = ret['X-s'], str(ret['X-t'])
+        page_params['user_id'] = user_id
+        page_params['cursor'] = cursor
+
+        res = requests.get(more_url, params=page_params, headers=xhs_headers, cookies=xhs_cookie)
+        if res.status_code != 200:
+            raise RuntimeError(f"{user_id} 请求分页数据 Unexpected status code: {res.status_code}")
+        page_info = res.json()
+        is_success = page_info['success']
+        if not is_success:
+            raise RuntimeError(f"{user_id} 请求分页数据返回状态不正常")
+        has_more = page_info['data']['has_more']
+        cursor = page_info['data']['cursor']
+        notes = page_info['data']['notes']
+        if not notes:
+            time.sleep(5)
+            logger.info(f"{user_id}-{cursor} 该页无作品")
+            continue
+        nickname = notes[0]['user']['nickname']
+        for index, note in enumerate(notes):
+            note_id = note['note_id']
+            is_top = note['interact_info']['sticky']
+            is_exist = utils.exist(os.path.join(ini['xhsDownloadDir'], f'{user_id}@{nickname}', f'*{note_id}*'))
+            if is_exist:
+                if is_top:
+                    continue
+                logger.info(f"{user_id}-{cursor} 无新作品")
+                return
+            get_one_note(note_id)
+            time.sleep(5)
+    logger.info(f"{user_id}-{cursor} 下载已完成")
+
+
+def get_one_note(note_id):
+    note_body['source_note_id'] = note_id
+    data = json.dumps(note_body, separators=(',', ':'))
+    ret = js.call('get_xs', '/api/sns/web/v1/feed', data, xhs_cookie['a1'])
+    xhs_headers['x-s'], xhs_headers['x-t'] = ret['X-s'], str(ret['X-t'])
+    try:
+        response = requests.post('https://edith.xiaohongshu.com/api/sns/web/v1/feed', headers=xhs_headers,
+                                 cookies=xhs_cookie,
+                                 data=data)
+        note_info = response.json()
+        note = note_info['data']['items'][0]
+    except Exception as e:
+        logger.warning(f'笔记 {note_id} 获取失败: {e}')
+        return
+    user_id = note['note_card']['user']['user_id']
+    nickname = note['note_card']['user']['nickname']
+    upload_timestamp = note['note_card']['time']
+    # 将时间戳转换为yyyyMMddHHmmss
+    upload_time_str = datetime.fromtimestamp(upload_timestamp / 1000).strftime('%Y%m%d%H%M%S')
+    note_type = note['note_card']['type']
+    save_path = os.path.join(ini['xhsDownloadDir'], f'{user_id}@{nickname}')
+    if not os.path.exists(save_path):
+        os.makedirs(save_path)
+    if note_type == 'video':
+        origin_key = note['note_card']['video']['consumer']['origin_video_key']
+        video_url = f'{random.choice(xhs_video_cdns)}/{origin_key}'
+        download(video_url, os.path.join(save_path, f'{upload_time_str}@{note_id}.mp4'), note_id)
+    elif note_type == 'normal':
+        images = note['note_card']['image_list']
+        os.mkdir(os.path.join(save_path, f'{upload_time_str}@{note_id}'))
+        for index, img in enumerate(images):
+            img_url = img['info_list'][0]['url']
+            trace_id = img_url.split('/')[-1].split('!')[0]
+            no_watermark_img_url = f'{random.choice(xhs_img_cdns)}/{trace_id}?imageView2/format/png'
+            download(no_watermark_img_url, os.path.join(save_path, f'{upload_time_str}@{note_id}', f'{index}.png'),
+                     note_id)
+    else:
+        logger.error(f'笔记 {note_id} 类型未知')
+
+
 @app.post("/")
-async def root(background_tasks: BackgroundTasks, link: str = Form(), cursor: str = Form()):
+async def root(background_tasks: BackgroundTasks, link: str = Form(), cursor: str = Form(None)):
     background_tasks.add_task(handle_monitor_task, link, cursor)
     return {"message": "请求成功"}
 
