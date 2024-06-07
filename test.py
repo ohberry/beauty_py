@@ -1,16 +1,44 @@
+from contextlib import asynccontextmanager
+
 import uvicorn
-import time
-import requests
-from configobj import ConfigObj
-from fastapi import FastAPI, BackgroundTasks, Form, Request
-from fastapi.responses import JSONResponse
-app = FastAPI()
-ini = ConfigObj('conf.ini', encoding="UTF8")
+from fastapi import FastAPI, BackgroundTasks, Form, Request, Depends
+from sqlalchemy.orm import Session
+
+import models
+from database import engine, SessionLocal
+
+models.Base.metadata.create_all(bind=engine)
+
+db: Session
+
+
+# def get_db():
+#     db = SessionLocal()
+#     try:
+#         yield db
+#     finally:
+#         db.close()
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global db
+    db = SessionLocal()
+    yield
+    db.close()
+
+
+lifespan = lifespan
+app = FastAPI(lifespan=lifespan)
+
 
 def handle_monitor_task(cursor: str):
-    result = ini.reload()
-    name = ini["name"]
-    print(name)
+    user = models.History()
+    user.platform = 'wf'
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+    print(user)
+
 
 @app.post("/")
 async def root(background_tasks: BackgroundTasks, link: str = Form(None), cursor: str = Form()):

@@ -10,15 +10,22 @@ from fastapi import FastAPI, BackgroundTasks, Form, Request
 from fastapi.responses import JSONResponse
 import redis.asyncio as redis
 import uvicorn
+from sqlalchemy.orm import Session
+
+import utils
 from XB import XBogus
 from configobj import ConfigObj
 from loguru import logger
 import requests
 from datetime import datetime
 
+from database import SessionLocal
+from models import History
+
 xb = XBogus()
 
 redis_client: redis.client.Redis
+db: Session
 ini = ConfigObj('conf.ini', encoding="UTF8")
 
 dy_headers = {
@@ -76,12 +83,12 @@ more_url = 'https://edith.xiaohongshu.com/api/sns/web/v1/user_posted'
 video_type = (0, 4, 51, 53, 55, 58, 61, 66, 109)
 img_type = (2, 68, 150)
 
-logger.add('xhs_{time:%Y%m%d}_info.log', level="INFO", rotation='1 day',
-           retention='5 days',
+logger.add('beauty_{time:%Y%m%d}_info.log', level="INFO", rotation='1 day',
+           retention='30 days',
            backtrace=True, diagnose=True,
            encoding='utf-8', filter=lambda record: record["level"].name == "INFO")
-logger.add('xhs_{time:%Y%m%d}_error.log', level="ERROR", rotation='1 day',
-           retention='5 days',
+logger.add('beauty_{time:%Y%m%d}_error.log', level="ERROR", rotation='1 day',
+           retention='30 days',
            backtrace=True, diagnose=True,
            encoding='utf-8', filter=lambda record: record["level"].name == "ERROR")
 
@@ -115,8 +122,11 @@ async def lifespan(app: FastAPI):
     pool = redis.ConnectionPool.from_url("redis://localhost:3278/0")
     redis_client = redis.Redis.from_pool(pool)
 
+    global db
+    db = SessionLocal()
     yield
     await redis_client.close()
+    db.close()
 
 
 app = FastAPI(lifespan=lifespan)
@@ -130,8 +140,7 @@ async def general_exception_handler(request: Request, exc: Exception):
     )
 
 
-async def download(url, path, work_id):
-    code = 200
+def download(url, path, work_id):
     try:
         for i in range(3):
             resp = requests.get(url, timeout=20, stream=True)
@@ -155,6 +164,7 @@ async def download(url, path, work_id):
             logger.info(f'have downloaded {url} 作品id：{work_id} {path}')
     except Exception as e:
         logger.error(f'下载失败，{url} {path}: {e}')
+        raise e
 
 
 async def handle_monitor_task(link: str, cursor: str = None):
@@ -240,7 +250,29 @@ async def handle_dy(sec_uid: str, max_cursor: str):
             time_format = time.strftime('%Y%m%d%H%M%S', time.localtime(create_time))
             if aweme_type in video_type:
                 video_url = aweme['video']['bit_rate'][0]['play_addr']['url_list'][0]
-                await download(video_url, os.path.join(base_path, f'{time_format}@{aweme_id}.mp4'), aweme_id)
+                try:
+                    download(video_url, os.path.join(base_path, f'{time_format}@{aweme_id}.mp4'), aweme_id)
+                    h = History()
+                    h.platform = 'dy'
+                    h.sec_uid = sec_uid
+                    h.user_id = uid
+                    h.work_id = aweme_id
+                    h.work_type = 'video'
+                    h.url = video_url
+                    h.status = 1
+                    db.commit()
+                    db.refresh(h)
+                except Exception as e:
+                    h = History()
+                    h.platform = 'dy'
+                    h.sec_uid = sec_uid
+                    h.user_id = uid
+                    h.work_id = aweme_id
+                    h.work_type = 'video'
+                    h.url = video_url
+                    h.status = 0
+                    db.commit()
+                    db.refresh(h)
 
             elif aweme_type in img_type:
                 img_path = os.path.join(base_path, f'{time_format}@{aweme_id}')
@@ -249,7 +281,29 @@ async def handle_dy(sec_uid: str, max_cursor: str):
                 images = aweme['images']
                 for j, img in enumerate(images):
                     img_url = img['url_list'][0]
-                    await download(img_url, os.path.join(img_path, f'{j}.webp'), aweme_id)
+                    try:
+                        download(img_url, os.path.join(img_path, f'{j}.webp'), aweme_id)
+                        h = History()
+                        h.platform = 'dy'
+                        h.sec_uid = sec_uid
+                        h.user_id = uid
+                        h.work_id = aweme_id
+                        h.work_type = 'img'
+                        h.url = img_url
+                        h.status = 1
+                        db.commit()
+                        db.refresh(h)
+                    except Exception as e:
+                        h = History()
+                        h.platform = 'dy'
+                        h.sec_uid = sec_uid
+                        h.user_id = uid
+                        h.work_id = aweme_id
+                        h.work_type = 'img'
+                        h.url = img_url
+                        h.status = 0
+                        db.commit()
+                        db.refresh(h)
             else:
                 logger.error(f'{nickname}-出现了未知类型-{aweme_type}:作品时间{time_format},作品id：{aweme_id}')
                 continue
@@ -323,7 +377,28 @@ def get_one_note(note_id):
     if note_type == 'video':
         origin_key = note['note_card']['video']['consumer']['origin_video_key']
         video_url = f'{random.choice(xhs_video_cdns)}/{origin_key}'
-        download(video_url, os.path.join(save_path, f'{upload_time_str}@{note_id}.mp4'), note_id)
+        try:
+            download(video_url, os.path.join(save_path, f'{upload_time_str}@{note_id}.mp4'), note_id)
+            h = History()
+            h.platform = 'xhs'
+            h.user_id = user_id
+            h.work_id = note_id
+            h.work_type = 'video'
+            h.url = video_url
+            h.status = 1
+            db.commit()
+            db.refresh(h)
+        except Exception as e:
+            h = History()
+            h.platform = 'xhs'
+            h.user_id = user_id
+            h.work_id = note_id
+            h.work_type = 'video'
+            h.url = video_url
+            h.status = 0
+            db.commit()
+            db.refresh(h)
+
     elif note_type == 'normal':
         images = note['note_card']['image_list']
         os.mkdir(os.path.join(save_path, f'{upload_time_str}@{note_id}'))
@@ -331,8 +406,29 @@ def get_one_note(note_id):
             img_url = img['info_list'][0]['url']
             trace_id = img_url.split('/')[-1].split('!')[0]
             no_watermark_img_url = f'{random.choice(xhs_img_cdns)}/{trace_id}?imageView2/format/png'
-            download(no_watermark_img_url, os.path.join(save_path, f'{upload_time_str}@{note_id}', f'{index}.png'),
+            try:
+                download(no_watermark_img_url, os.path.join(save_path, f'{upload_time_str}@{note_id}', f'{index}.png'),
                      note_id)
+                h = History()
+                h.platform = 'xhs'
+                h.user_id = user_id
+                h.work_id = note_id
+                h.work_type = 'video'
+                h.url = img_url
+                h.status = 1
+                db.commit()
+                db.refresh(h)
+            except Exception as e:
+                h = History()
+                h.platform = 'xhs'
+                h.user_id = user_id
+                h.work_id = note_id
+                h.work_type = 'video'
+                h.url = img_url
+                h.status = 0
+                db.commit()
+                db.refresh(h)
+
     else:
         logger.error(f'笔记 {note_id} 类型未知')
 
@@ -345,3 +441,4 @@ async def root(background_tasks: BackgroundTasks, link: str = Form(), cursor: st
 
 if __name__ == "__main__":
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
+# 如果修改过dy号short_id就会更为为你修改的号码，unique_id为你的dy初始值，uid是相当于用户的身份证唯一码
