@@ -1,4 +1,6 @@
+import time
 from contextlib import asynccontextmanager
+from datetime import datetime
 
 import uvicorn
 from fastapi import FastAPI, BackgroundTasks, Form, Request, Depends
@@ -32,12 +34,16 @@ app = FastAPI(lifespan=lifespan)
 
 
 def handle_monitor_task(cursor: str):
+    s1 = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime())
+    print(s1)
+    # s2 = datetime.fromtimestamp(1704277200000/1000).strftime('%Y-%m-%d %H:%M:%S')
+    # print(s2)
     user = models.History()
     user.platform = 'wf'
+    user.create_time = s1
     db.add(user)
     db.commit()
     db.refresh(user)
-    print(user)
 
 
 @app.post("/")
@@ -47,4 +53,4 @@ async def root(background_tasks: BackgroundTasks, link: str = Form(None), cursor
 
 
 if __name__ == '__main__':
-    uvicorn.run("test:app", host="0.0.0.0", port=8000, reload=True)
+    uvicorn.run(app, host="0.0.0.0", port=8000, reload=False)
