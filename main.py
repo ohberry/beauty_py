@@ -248,31 +248,25 @@ async def handle_dy(sec_uid: str, max_cursor: str):
 
             aweme_type = aweme['aweme_type']
             time_format = time.strftime('%Y%m%d%H%M%S', time.localtime(create_time))
+
+            h = History()
+            h.platform = 'dy'
+            h.sec_uid = sec_uid
+            h.user_id = uid
+            h.work_id = aweme_id
+            h.create_time = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(create_time))
             if aweme_type in video_type:
                 video_url = aweme['video']['bit_rate'][0]['play_addr']['url_list'][0]
+
+                h.work_type = 'video'
+                h.url = video_url
                 try:
                     download(video_url, os.path.join(base_path, f'{time_format}@{aweme_id}.mp4'), aweme_id)
-                    h = History()
-                    h.platform = 'dy'
-                    h.sec_uid = sec_uid
-                    h.user_id = uid
-                    h.work_id = aweme_id
-                    h.work_type = 'video'
-                    h.url = video_url
                     h.status = 1
-                    db.commit()
-                    db.refresh(h)
                 except Exception as e:
-                    h = History()
-                    h.platform = 'dy'
-                    h.sec_uid = sec_uid
-                    h.user_id = uid
-                    h.work_id = aweme_id
-                    h.work_type = 'video'
-                    h.url = video_url
                     h.status = 0
-                    db.commit()
-                    db.refresh(h)
+                db.commit()
+                db.refresh(h)
 
             elif aweme_type in img_type:
                 img_path = os.path.join(base_path, f'{time_format}@{aweme_id}')
@@ -281,29 +275,19 @@ async def handle_dy(sec_uid: str, max_cursor: str):
                 images = aweme['images']
                 for j, img in enumerate(images):
                     img_url = img['url_list'][0]
+
+                    h.work_type = 'img'
+                    h.url = img_url
+                    h.index = j
                     try:
                         download(img_url, os.path.join(img_path, f'{j}.webp'), aweme_id)
-                        h = History()
-                        h.platform = 'dy'
-                        h.sec_uid = sec_uid
-                        h.user_id = uid
-                        h.work_id = aweme_id
-                        h.work_type = 'img'
-                        h.url = img_url
                         h.status = 1
-                        db.commit()
-                        db.refresh(h)
                     except Exception as e:
-                        h = History()
-                        h.platform = 'dy'
-                        h.sec_uid = sec_uid
-                        h.user_id = uid
-                        h.work_id = aweme_id
-                        h.work_type = 'img'
-                        h.url = img_url
                         h.status = 0
-                        db.commit()
-                        db.refresh(h)
+                    db.add(h)
+                    db.commit()
+                    db.refresh(h)
+
             else:
                 logger.error(f'{nickname}-出现了未知类型-{aweme_type}:作品时间{time_format},作品id：{aweme_id}')
                 continue
@@ -374,30 +358,25 @@ def get_one_note(note_id):
     save_path = os.path.join(ini['xhsDownloadDir'], f'{user_id}@{nickname}')
     if not os.path.exists(save_path):
         os.makedirs(save_path)
+
+    h = History()
+    h.platform = 'xhs'
+    h.user_id = user_id
+    h.work_id = note_id
+    h.create_time = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(upload_timestamp / 1000))
     if note_type == 'video':
         origin_key = note['note_card']['video']['consumer']['origin_video_key']
         video_url = f'{random.choice(xhs_video_cdns)}/{origin_key}'
+
+        h.work_type = 'video'
+        h.url = video_url
         try:
             download(video_url, os.path.join(save_path, f'{upload_time_str}@{note_id}.mp4'), note_id)
-            h = History()
-            h.platform = 'xhs'
-            h.user_id = user_id
-            h.work_id = note_id
-            h.work_type = 'video'
-            h.url = video_url
             h.status = 1
-            db.commit()
-            db.refresh(h)
         except Exception as e:
-            h = History()
-            h.platform = 'xhs'
-            h.user_id = user_id
-            h.work_id = note_id
-            h.work_type = 'video'
-            h.url = video_url
             h.status = 0
-            db.commit()
-            db.refresh(h)
+        db.commit()
+        db.refresh(h)
 
     elif note_type == 'normal':
         images = note['note_card']['image_list']
@@ -406,28 +385,18 @@ def get_one_note(note_id):
             img_url = img['info_list'][0]['url']
             trace_id = img_url.split('/')[-1].split('!')[0]
             no_watermark_img_url = f'{random.choice(xhs_img_cdns)}/{trace_id}?imageView2/format/png'
+
+            h.work_type = 'img'
+            h.url = img_url
+            h.index = index
             try:
                 download(no_watermark_img_url, os.path.join(save_path, f'{upload_time_str}@{note_id}', f'{index}.png'),
-                     note_id)
-                h = History()
-                h.platform = 'xhs'
-                h.user_id = user_id
-                h.work_id = note_id
-                h.work_type = 'video'
-                h.url = img_url
+                         note_id)
                 h.status = 1
-                db.commit()
-                db.refresh(h)
             except Exception as e:
-                h = History()
-                h.platform = 'xhs'
-                h.user_id = user_id
-                h.work_id = note_id
-                h.work_type = 'video'
-                h.url = img_url
                 h.status = 0
-                db.commit()
-                db.refresh(h)
+            db.commit()
+            db.refresh(h)
 
     else:
         logger.error(f'笔记 {note_id} 类型未知')
@@ -440,5 +409,5 @@ async def root(background_tasks: BackgroundTasks, link: str = Form(), cursor: st
 
 
 if __name__ == "__main__":
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
+    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=False)
 # 如果修改过dy号short_id就会更为为你修改的号码，unique_id为你的dy初始值，uid是相当于用户的身份证唯一码

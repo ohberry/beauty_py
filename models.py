@@ -1,5 +1,4 @@
-from sqlalchemy import Boolean, Column, ForeignKey, Integer, String
-from sqlalchemy.orm import relationship
+from sqlalchemy import Column, Integer, String
 
 from database import Base
 
@@ -15,5 +14,6 @@ class History(Base):
     work_type = Column(String)
     url = Column(String)
     index = Column(Integer)
-    # 1：成功 2：失败
+    # 1：成功 0：失败
     status = Column(Integer)
+    create_time = Column(String)
