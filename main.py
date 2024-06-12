@@ -208,6 +208,7 @@ async def handle_dy(sec_uid: str, max_cursor: str, db: Session = None):
             return
 
         has_more = awemes['has_more']
+        # 可能存在返回的json只有status_code且为0，不知道什么原因造成的
         if not has_more:
             logger.info(f'{sec_uid}-接口返回异常，无其他数据')
             return
@@ -238,6 +239,7 @@ async def handle_dy(sec_uid: str, max_cursor: str, db: Session = None):
             # 时间戳秒
             create_time = aweme['create_time']
 
+            # 如果本地最新的时间大于create_time，则说明该作品已经下载过，跳过
             if local_latest_time >= create_time:
                 if is_top == 1:
                     continue
@@ -250,7 +252,6 @@ async def handle_dy(sec_uid: str, max_cursor: str, db: Session = None):
 
             aweme_type = aweme['aweme_type']
             time_format = time.strftime('%Y%m%d%H%M%S', time.localtime(create_time))
-
 
             if aweme_type in video_type:
                 video_url = aweme['video']['bit_rate'][0]['play_addr']['url_list'][0]
@@ -316,11 +317,11 @@ def handle_xhs(user_id, cursor='', db: Session = None):
 
         res = requests.get(more_url, params=page_params, headers=xhs_headers, cookies=xhs_cookie)
         if res.status_code != 200:
-            raise RuntimeError(f"{user_id} 请求分页数据 Unexpected status code: {res.status_code}")
+            raise Exception(f"{user_id} 请求分页数据 Unexpected status code: {res.status_code}")
         page_info = res.json()
         is_success = page_info['success']
         if not is_success:
-            raise RuntimeError(f"{user_id} 请求分页数据返回状态不正常")
+            raise Exception(f"{user_id} 请求分页数据返回状态不正常")
         has_more = page_info['data']['has_more']
         cursor = page_info['data']['cursor']
         notes = page_info['data']['notes']
@@ -367,7 +368,6 @@ def get_one_note(note_id, db):
     if not os.path.exists(save_path):
         os.makedirs(save_path)
 
-
     if note_type == 'video':
         origin_key = note['note_card']['video']['consumer']['origin_video_key']
         video_url = f'{random.choice(xhs_video_cdns)}/{origin_key}'
@@ -382,8 +382,9 @@ def get_one_note(note_id, db):
         try:
             download(video_url, os.path.join(save_path, f'{upload_time_str}@{note_id}.mp4'), note_id)
             h.status = 1
-        except Exception as e:
+        except Exception:
             h.status = 0
+        db.add(h)
         db.commit()
 
     elif note_type == 'normal':
@@ -408,6 +409,7 @@ def get_one_note(note_id, db):
                 h.status = 1
             except Exception as e:
                 h.status = 0
+            db.add(h)
             db.commit()
 
     else:
