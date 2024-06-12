@@ -6,12 +6,13 @@ import time
 from contextlib import asynccontextmanager
 
 import execjs
-from fastapi import FastAPI, BackgroundTasks, Form, Request
+from fastapi import FastAPI, BackgroundTasks, Form, Request, Depends
 from fastapi.responses import JSONResponse
 import redis.asyncio as redis
 import uvicorn
 from sqlalchemy.orm import Session
 
+import database
 import utils
 from XB import XBogus
 from configobj import ConfigObj
@@ -25,7 +26,7 @@ from models import History
 xb = XBogus()
 
 redis_client: redis.client.Redis
-db: Session
+
 ini = ConfigObj('conf.ini', encoding="UTF8")
 
 dy_headers = {
@@ -122,11 +123,8 @@ async def lifespan(app: FastAPI):
     pool = redis.ConnectionPool.from_url("redis://localhost:3278/0")
     redis_client = redis.Redis.from_pool(pool)
 
-    global db
-    db = SessionLocal()
     yield
     await redis_client.close()
-    db.close()
 
 
 app = FastAPI(lifespan=lifespan)
@@ -147,12 +145,10 @@ def download(url, path, work_id):
             code = resp.status_code
             if code != 200:
                 if code != 429:
-                    logger.error(f"下载请求异常，状态码: {resp.status_code}")
-                    return
+                    raise Exception(f"下载请求异常，状态码: {resp.status_code}")
                 else:
                     if i == 2:
-                        logger.error(f"下载请求异常，状态码: {resp.status_code}")
-                        return
+                        raise Exception(f"下载请求异常，状态码: {resp.status_code}")
                     logger.error(f"第{i + 1}次尝试：下载失败 {url} {path}")
                     time.sleep(3)
                     continue
@@ -162,12 +158,13 @@ def download(url, path, work_id):
                         break
                     f.write(chunk)
             logger.info(f'have downloaded {url} 作品id：{work_id} {path}')
+            return
     except Exception as e:
         logger.error(f'下载失败，{url} {path}: {e}')
         raise e
 
 
-async def handle_monitor_task(link: str, cursor: str = None):
+async def handle_monitor_task(link: str, cursor: str = None, db: Session = None):
     if link.find('douyin') != -1:
         match = re.search(r'(?<=user/)[\w|-]+', link)
         if not match:
@@ -175,13 +172,14 @@ async def handle_monitor_task(link: str, cursor: str = None):
         sec_uid = match.group()
         if cursor is None:
             cursor = 0
-        await handle_dy(sec_uid, cursor)
+        await handle_dy(sec_uid, cursor, db)
 
 
-async def handle_dy(sec_uid: str, max_cursor: str):
+async def handle_dy(sec_uid: str, max_cursor: str, db: Session = None):
     has_more = 1
     page = 0
     local_latest_time = 0
+    temp_time = 0
     while has_more == 1:
         logger.info(f'{sec_uid}-{max_cursor}页开始下载:')
         post_params = xb.getXBogus(f'aid=6383&sec_user_id'
@@ -233,9 +231,11 @@ async def handle_dy(sec_uid: str, max_cursor: str):
                 local_latest_time = int(local_latest_time)
             if not os.path.exists(base_path):
                 os.makedirs(base_path)
+            temp_time = local_latest_time
         for index, aweme in enumerate(aweme_list):
             aweme_id = aweme['aweme_id']
             is_top = aweme['is_top']
+            # 时间戳秒
             create_time = aweme['create_time']
 
             if local_latest_time >= create_time:
@@ -243,21 +243,24 @@ async def handle_dy(sec_uid: str, max_cursor: str):
                     continue
                 logger.info(f'{sec_uid} {nickname}-无新作品')
                 return
-            if page == 0 and index == 0:
-                await RedisTemplate.set(f'{sec_uid}', str(create_time))
+            if page == 0:
+                if create_time > temp_time and index <= 3:
+                    temp_time = create_time
+                    await RedisTemplate.set(f'{sec_uid}', str(temp_time))
 
             aweme_type = aweme['aweme_type']
             time_format = time.strftime('%Y%m%d%H%M%S', time.localtime(create_time))
 
-            h = History()
-            h.platform = 'dy'
-            h.sec_uid = sec_uid
-            h.user_id = uid
-            h.work_id = aweme_id
-            h.create_time = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(create_time))
+
             if aweme_type in video_type:
                 video_url = aweme['video']['bit_rate'][0]['play_addr']['url_list'][0]
 
+                h = History()
+                h.platform = 'dy'
+                h.sec_uid = sec_uid
+                h.user_id = uid
+                h.work_id = aweme_id
+                h.create_time = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(create_time))
                 h.work_type = 'video'
                 h.url = video_url
                 try:
@@ -265,8 +268,8 @@ async def handle_dy(sec_uid: str, max_cursor: str):
                     h.status = 1
                 except Exception as e:
                     h.status = 0
+                db.add(h)
                 db.commit()
-                db.refresh(h)
 
             elif aweme_type in img_type:
                 img_path = os.path.join(base_path, f'{time_format}@{aweme_id}')
@@ -275,7 +278,12 @@ async def handle_dy(sec_uid: str, max_cursor: str):
                 images = aweme['images']
                 for j, img in enumerate(images):
                     img_url = img['url_list'][0]
-
+                    h = History()
+                    h.platform = 'dy'
+                    h.sec_uid = sec_uid
+                    h.user_id = uid
+                    h.work_id = aweme_id
+                    h.create_time = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(create_time))
                     h.work_type = 'img'
                     h.url = img_url
                     h.index = j
@@ -286,17 +294,17 @@ async def handle_dy(sec_uid: str, max_cursor: str):
                         h.status = 0
                     db.add(h)
                     db.commit()
-                    db.refresh(h)
+                    time.sleep(1)
 
             else:
                 logger.error(f'{nickname}-出现了未知类型-{aweme_type}:作品时间{time_format},作品id：{aweme_id}')
                 continue
-            time.sleep(1)
+            time.sleep(2)
         page += 1
     logger.info(f'{sec_uid}到底了')
 
 
-def handle_xhs(user_id, cursor=''):
+def handle_xhs(user_id, cursor='', db: Session = None):
     has_more = True
     while has_more:
         logger.info(f"{user_id}-{cursor}页 开始下载")
@@ -330,12 +338,12 @@ def handle_xhs(user_id, cursor=''):
                     continue
                 logger.info(f"{user_id}-{cursor} 无新作品")
                 return
-            get_one_note(note_id)
+            get_one_note(note_id, db)
             time.sleep(5)
     logger.info(f"{user_id}-{cursor} 下载已完成")
 
 
-def get_one_note(note_id):
+def get_one_note(note_id, db):
     note_body['source_note_id'] = note_id
     data = json.dumps(note_body, separators=(',', ':'))
     ret = js.call('get_xs', '/api/sns/web/v1/feed', data, xhs_cookie['a1'])
@@ -359,15 +367,16 @@ def get_one_note(note_id):
     if not os.path.exists(save_path):
         os.makedirs(save_path)
 
-    h = History()
-    h.platform = 'xhs'
-    h.user_id = user_id
-    h.work_id = note_id
-    h.create_time = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(upload_timestamp / 1000))
+
     if note_type == 'video':
         origin_key = note['note_card']['video']['consumer']['origin_video_key']
         video_url = f'{random.choice(xhs_video_cdns)}/{origin_key}'
 
+        h = History()
+        h.platform = 'xhs'
+        h.user_id = user_id
+        h.work_id = note_id
+        h.create_time = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(upload_timestamp / 1000))
         h.work_type = 'video'
         h.url = video_url
         try:
@@ -376,7 +385,6 @@ def get_one_note(note_id):
         except Exception as e:
             h.status = 0
         db.commit()
-        db.refresh(h)
 
     elif note_type == 'normal':
         images = note['note_card']['image_list']
@@ -386,6 +394,11 @@ def get_one_note(note_id):
             trace_id = img_url.split('/')[-1].split('!')[0]
             no_watermark_img_url = f'{random.choice(xhs_img_cdns)}/{trace_id}?imageView2/format/png'
 
+            h = History()
+            h.platform = 'xhs'
+            h.user_id = user_id
+            h.work_id = note_id
+            h.create_time = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(upload_timestamp / 1000))
             h.work_type = 'img'
             h.url = img_url
             h.index = index
@@ -396,18 +409,18 @@ def get_one_note(note_id):
             except Exception as e:
                 h.status = 0
             db.commit()
-            db.refresh(h)
 
     else:
         logger.error(f'笔记 {note_id} 类型未知')
 
 
 @app.post("/")
-async def root(background_tasks: BackgroundTasks, link: str = Form(), cursor: str = Form(None)):
-    background_tasks.add_task(handle_monitor_task, link, cursor)
+async def root(background_tasks: BackgroundTasks, link: str = Form(), cursor: str = Form(None),
+               db: Session = Depends(database.get_db)):
+    background_tasks.add_task(handle_monitor_task, link, cursor, db)
     return {"message": "请求成功"}
 
 
 if __name__ == "__main__":
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=False)
+    uvicorn.run("main:app", host="0.0.0.0", port=8899, reload=False)
 # 如果修改过dy号short_id就会更为为你修改的号码，unique_id为你的dy初始值，uid是相当于用户的身份证唯一码
