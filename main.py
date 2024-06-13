@@ -3,12 +3,10 @@ import os
 import random
 import re
 import time
-from contextlib import asynccontextmanager
 
 import execjs
 from fastapi import FastAPI, BackgroundTasks, Form, Request, Depends
 from fastapi.responses import JSONResponse
-import redis.asyncio as redis
 import uvicorn
 from sqlalchemy.orm import Session
 
@@ -19,13 +17,10 @@ from configobj import ConfigObj
 from loguru import logger
 import requests
 from datetime import datetime
-
-from database import SessionLocal
 from models import History
 
-xb = XBogus()
 
-redis_client: redis.client.Redis
+xb = XBogus()
 
 ini = ConfigObj('conf.ini', encoding="UTF8")
 
@@ -105,29 +100,7 @@ def cookie_to_dict(cookie_str):
 
 xhs_cookie = cookie_to_dict(ini['xhsCookie'])
 
-
-class RedisTemplate:
-    @classmethod
-    async def get(cls, key: str) -> str:
-        result = await redis_client.get(key)
-        return result
-
-    @classmethod
-    async def set(cls, key: str, value: str):
-        await redis_client.set(key, value)
-
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    global redis_client
-    pool = redis.ConnectionPool.from_url("redis://localhost:3278/0")
-    redis_client = redis.Redis.from_pool(pool)
-
-    yield
-    await redis_client.close()
-
-
-app = FastAPI(lifespan=lifespan)
+app = FastAPI()
 
 
 @app.exception_handler(Exception)
@@ -139,29 +112,25 @@ async def general_exception_handler(request: Request, exc: Exception):
 
 
 def download(url, path, work_id):
-    try:
-        for i in range(3):
-            resp = requests.get(url, timeout=20, stream=True)
-            code = resp.status_code
-            if code != 200:
-                if code != 429:
+    for i in range(3):
+        resp = requests.get(url, timeout=20, stream=True)
+        code = resp.status_code
+        if code != 200:
+            if code != 429:
+                raise Exception(f"下载请求异常，状态码: {resp.status_code}")
+            else:
+                if i == 2:
                     raise Exception(f"下载请求异常，状态码: {resp.status_code}")
-                else:
-                    if i == 2:
-                        raise Exception(f"下载请求异常，状态码: {resp.status_code}")
-                    logger.error(f"第{i + 1}次尝试：下载失败 {url} {path}")
-                    time.sleep(3)
-                    continue
-            with open(path, 'wb') as f:
-                for chunk in resp.iter_content(chunk_size=8192):
-                    if not chunk:
-                        break
-                    f.write(chunk)
-            logger.info(f'have downloaded {url} 作品id：{work_id} {path}')
-            return
-    except Exception as e:
-        logger.error(f'下载失败，{url} {path}: {e}')
-        raise e
+                logger.error(f"第{i + 1}次尝试：等待2s后重试")
+                time.sleep(2)
+                continue
+        with open(path, 'wb') as f:
+            for chunk in resp.iter_content(chunk_size=8192):
+                if not chunk:
+                    break
+                f.write(chunk)
+        logger.info(f'have downloaded {url} 作品id：{work_id} {path}')
+        return
 
 
 async def handle_monitor_task(link: str, cursor: str = None, db: Session = None):
@@ -178,7 +147,7 @@ async def handle_monitor_task(link: str, cursor: str = None, db: Session = None)
 async def handle_dy(sec_uid: str, max_cursor: str, db: Session = None):
     has_more = 1
     page = 0
-    local_latest_time = 0
+    old_time = 0
     temp_time = 0
     while has_more == 1:
         logger.info(f'{sec_uid}-{max_cursor}页开始下载:')
@@ -225,14 +194,10 @@ async def handle_dy(sec_uid: str, max_cursor: str, db: Session = None):
         sub = sec_uid[-6:]
         base_path = os.path.join(ini['dyDownloadDir'], f'{uid}@{nickname}[{sub}]')
         if page == 0:
-            local_latest_time = await RedisTemplate.get(f'{sec_uid}')
-            if not local_latest_time:
-                local_latest_time = 0
-            else:
-                local_latest_time = int(local_latest_time)
+            old_time = utils.local(uid, ini['dyDownloadDir'])
+            temp_time = old_time
             if not os.path.exists(base_path):
                 os.makedirs(base_path)
-            temp_time = local_latest_time
         for index, aweme in enumerate(aweme_list):
             aweme_id = aweme['aweme_id']
             is_top = aweme['is_top']
@@ -240,7 +205,7 @@ async def handle_dy(sec_uid: str, max_cursor: str, db: Session = None):
             create_time = aweme['create_time']
 
             # 如果本地最新的时间大于create_time，则说明该作品已经下载过，跳过
-            if local_latest_time >= create_time:
+            if temp_time >= create_time:
                 if is_top == 1:
                     continue
                 logger.info(f'{sec_uid} {nickname}-无新作品')
@@ -248,7 +213,6 @@ async def handle_dy(sec_uid: str, max_cursor: str, db: Session = None):
             if page == 0:
                 if create_time > temp_time and index <= 3:
                     temp_time = create_time
-                    await RedisTemplate.set(f'{sec_uid}', str(temp_time))
 
             aweme_type = aweme['aweme_type']
             time_format = time.strftime('%Y%m%d%H%M%S', time.localtime(create_time))
@@ -264,10 +228,12 @@ async def handle_dy(sec_uid: str, max_cursor: str, db: Session = None):
                 h.create_time = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(create_time))
                 h.work_type = 'video'
                 h.url = video_url
+                save_path = os.path.join(base_path, f'{aweme_id}.mp4')
                 try:
-                    download(video_url, os.path.join(base_path, f'{time_format}@{aweme_id}.mp4'), aweme_id)
+                    download(video_url, save_path, aweme_id)
                     h.status = 1
                 except Exception as e:
+                    logger.error(f'{sec_uid}-{save_path} {video_url}下载视频失败，原因：{e}')
                     h.status = 0
                 db.add(h)
                 db.commit()
@@ -288,10 +254,12 @@ async def handle_dy(sec_uid: str, max_cursor: str, db: Session = None):
                     h.work_type = 'img'
                     h.url = img_url
                     h.index = j
+                    save_path = os.path.join(img_path, f'{j}.webp')
                     try:
-                        download(img_url, os.path.join(img_path, f'{j}.webp'), aweme_id)
+                        download(img_url, save_path, aweme_id)
                         h.status = 1
                     except Exception as e:
+                        logger.error(f'{sec_uid}-{save_path}-{img_url}下载视频失败，原因：{e}')
                         h.status = 0
                     db.add(h)
                     db.commit()
@@ -382,7 +350,8 @@ def get_one_note(note_id, db):
         try:
             download(video_url, os.path.join(save_path, f'{upload_time_str}@{note_id}.mp4'), note_id)
             h.status = 1
-        except Exception:
+        except Exception as e:
+            logger.error(f'{user_id}-{save_path}-{video_url}下载视频失败，原因：{e}')
             h.status = 0
         db.add(h)
         db.commit()
@@ -408,6 +377,7 @@ def get_one_note(note_id, db):
                          note_id)
                 h.status = 1
             except Exception as e:
+                logger.error(f'{user_id}-{save_path}-{img_url}下载视频失败，原因：{e}')
                 h.status = 0
             db.add(h)
             db.commit()
