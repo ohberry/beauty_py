@@ -142,6 +142,13 @@ async def handle_monitor_task(link: str, cursor: str = None, db: Session = None)
         if cursor is None:
             cursor = 0
         await handle_dy(sec_uid, cursor, db)
+    elif link.find('xiaohongshu') != -1:
+        user_id = link.split('/')[-1]
+        if cursor is None:
+            cursor = ''
+        await handle_xhs(user_id, cursor, db)
+    else:
+        logger.error(f'不支持的网站：{link}')
 
 
 async def handle_dy(sec_uid: str, max_cursor: str, db: Session = None):
@@ -273,7 +280,7 @@ async def handle_dy(sec_uid: str, max_cursor: str, db: Session = None):
     logger.info(f'{sec_uid}到底了')
 
 
-def handle_xhs(user_id, cursor='', db: Session = None):
+async def handle_xhs(user_id, cursor='', db: Session = None):
     has_more = True
     while has_more:
         logger.info(f"{user_id}-{cursor}页 开始下载")
