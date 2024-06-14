@@ -154,7 +154,6 @@ async def handle_monitor_task(link: str, cursor: str = None, db: Session = None)
 async def handle_dy(sec_uid: str, max_cursor: str, db: Session = None):
     has_more = 1
     page = 0
-    old_time = 0
     temp_time = 0
     while has_more == 1:
         logger.info(f'{sec_uid}-{max_cursor}页开始下载:')
@@ -201,8 +200,11 @@ async def handle_dy(sec_uid: str, max_cursor: str, db: Session = None):
         sub = sec_uid[-6:]
         base_path = os.path.join(ini['dyDownloadDir'], f'{uid}@{nickname}[{sub}]')
         if page == 0:
-            old_time = utils.local(uid, ini['dyDownloadDir'])
-            temp_time = old_time
+            try:
+                temp_time = get_local_time(uid, ini['dyDownloadDir'])
+            except Exception as e:
+                logger.error(f'{sec_uid}-获取本地时间失败-{e}')
+                return
             if not os.path.exists(base_path):
                 os.makedirs(base_path)
         for index, aweme in enumerate(aweme_list):
@@ -235,7 +237,7 @@ async def handle_dy(sec_uid: str, max_cursor: str, db: Session = None):
                 h.create_time = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(create_time))
                 h.work_type = 'video'
                 h.url = video_url
-                save_path = os.path.join(base_path, f'{aweme_id}.mp4')
+                save_path = os.path.join(base_path, f'{time_format}@{aweme_id}.mp4')
                 try:
                     download(video_url, save_path, aweme_id)
                     h.status = 1
@@ -392,6 +394,23 @@ def get_one_note(note_id, db):
     else:
         logger.error(f'笔记 {note_id} 类型未知')
 
+
+def get_local_time(uid, path):
+    t1 = 0
+    t2 = 0
+    file_name = utils.query(f'file:{path}\\{uid}* depth:4')
+    if file_name:
+        match = re.search(r'(\d*?)@', file_name)
+        if match:
+            t = time.strptime(match.group(1), '%Y%m%d%H%M%S')
+            t1 = time.mktime(t)
+    folder_name = utils.query(f'folder:{path}\\{uid}* depth:4')
+    if folder_name:
+        match = re.search(r'(\d*?)@', folder_name)
+        if match:
+            t = time.strptime(match.group(1), '%Y%m%d%H%M%S')
+            t2 = time.mktime(t)
+    return max([t1, t2])
 
 @app.post("/")
 async def root(background_tasks: BackgroundTasks, link: str = Form(), cursor: str = Form(None),
