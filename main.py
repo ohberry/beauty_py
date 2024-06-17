@@ -19,7 +19,6 @@ import requests
 from datetime import datetime
 from models import History
 
-
 xb = XBogus()
 
 ini = ConfigObj('conf.ini', encoding="UTF8")
@@ -137,7 +136,8 @@ async def handle_monitor_task(link: str, cursor: str = None, db: Session = None)
     if link.find('douyin') != -1:
         match = re.search(r'(?<=user/)[\w|-]+', link)
         if not match:
-            raise Exception('invalid link')
+            logger.error('invalid link')
+            return
         sec_uid = match.group()
         if cursor is None:
             cursor = 0
@@ -185,11 +185,10 @@ async def handle_dy(sec_uid: str, max_cursor: str, db: Session = None):
         has_more = awemes['has_more']
         # 可能存在返回的json只有status_code且为0，不知道什么原因造成的
         if not has_more:
-            logger.info(f'{sec_uid}-接口返回异常，无其他数据')
+            logger.error(f'{sec_uid}-接口返回异常，无其他数据')
             return
 
         aweme_list = awemes['aweme_list']
-        max_cursor = awemes['max_cursor']
         if not aweme_list:
             time.sleep(3)
             continue
@@ -199,14 +198,16 @@ async def handle_dy(sec_uid: str, max_cursor: str, db: Session = None):
         nickname = author['nickname']
         sub = sec_uid[-6:]
         base_path = os.path.join(ini['dyDownloadDir'], f'{uid}@{nickname}[{sub}]')
-        if page == 0:
+        if max_cursor == 0:
             try:
-                temp_time = get_local_time(uid, ini['dyDownloadDir'])
+                temp_time = utils.get_local_time(uid, ini['dyDownloadDir'])
+                logger.info(f'{sec_uid}-本地时间：{temp_time}')
             except Exception as e:
                 logger.error(f'{sec_uid}-获取本地时间失败-{e}')
                 return
             if not os.path.exists(base_path):
                 os.makedirs(base_path)
+        max_cursor = awemes['max_cursor']
         for index, aweme in enumerate(aweme_list):
             aweme_id = aweme['aweme_id']
             is_top = aweme['is_top']
@@ -219,10 +220,6 @@ async def handle_dy(sec_uid: str, max_cursor: str, db: Session = None):
                     continue
                 logger.info(f'{sec_uid} {nickname}-无新作品')
                 return
-            if page == 0:
-                if create_time > temp_time and index <= 3:
-                    temp_time = create_time
-
             aweme_type = aweme['aweme_type']
             time_format = time.strftime('%Y%m%d%H%M%S', time.localtime(create_time))
 
@@ -294,11 +291,13 @@ async def handle_xhs(user_id, cursor='', db: Session = None):
 
         res = requests.get(more_url, params=page_params, headers=xhs_headers, cookies=xhs_cookie)
         if res.status_code != 200:
-            raise Exception(f"{user_id} 请求分页数据 Unexpected status code: {res.status_code}")
+            logger.error(f"{user_id} 请求分页数据 Unexpected status code: {res.status_code}")
+            return
         page_info = res.json()
         is_success = page_info['success']
         if not is_success:
-            raise Exception(f"{user_id} 请求分页数据返回状态不正常")
+            logger.error(f"{user_id} 请求分页数据返回状态不正常")
+            return
         has_more = page_info['data']['has_more']
         cursor = page_info['data']['cursor']
         notes = page_info['data']['notes']
@@ -395,27 +394,44 @@ def get_one_note(note_id, db):
         logger.error(f'笔记 {note_id} 类型未知')
 
 
-def get_local_time(uid, path):
-    t1 = 0
-    t2 = 0
-    file_name = utils.query(f'file:{path}\\{uid}* depth:4')
-    if file_name:
-        match = re.search(r'(\d*?)@', file_name)
-        if match:
-            t = time.strptime(match.group(1), '%Y%m%d%H%M%S')
-            t1 = time.mktime(t)
-    folder_name = utils.query(f'folder:{path}\\{uid}* depth:4')
-    if folder_name:
-        match = re.search(r'(\d*?)@', folder_name)
-        if match:
-            t = time.strptime(match.group(1), '%Y%m%d%H%M%S')
-            t2 = time.mktime(t)
-    return max([t1, t2])
+def get_one_aweme(item_id):
+    params = xb.getXBogus(f'aweme_id={item_id}&aid=1128&version_name=23.5.0&device_platform=android&os_version=2333')
+    resp = requests.get(f'https://www.douyin.com/aweme/v1/web/aweme/detail/?{params}', headers=dy_headers)
+    info_json = resp.json()
+    nickname = info_json['aweme_detail']['author']['nickname']
+    uid = info_json['aweme_detail']['author']['uid']
+    sec_uid = info_json['aweme_detail']['author']['sec_uid']
+    create_time = info_json['aweme_detail']['create_time']
+    aweme_type = info_json['aweme_detail']['aweme_type']
+    base_path = os.path.join(ini['dyDownloadDir'], f'{uid}@{nickname}[{sec_uid[-6:]}]')
+    if not os.path.exists(base_path):
+        os.makedirs(base_path)
+    time_format = time.strftime('%Y%m%d%H%M%S', time.localtime(create_time))
+    if aweme_type in img_type:
+        img_path = os.path.join(base_path, f'{time_format}@{item_id}')
+        os.makedirs(img_path)
+        images = info_json['aweme_detail']['images']
+        for j, img in enumerate(images):
+            img_url = img['url_list'][0]
+            download(img_url, os.path.join(img_path, f'{j}.webp'), item_id)
+    elif aweme_type in video_type:
+        video_url = info_json['aweme_detail']['video']['bit_rate'][0]['play_addr']['url_list'][0]
+        download(video_url, os.path.join(base_path, f'{time_format}@{item_id}.mp4'), item_id)
+    else:
+        logger.error(f'{nickname}-出现了未知类型-{aweme_type}:作品时间{time_format},作品id：{item_id}')
+    pass
+
 
 @app.post("/")
 async def root(background_tasks: BackgroundTasks, link: str = Form(), cursor: str = Form(None),
                db: Session = Depends(database.get_db)):
     background_tasks.add_task(handle_monitor_task, link, cursor, db)
+    return {"message": "请求成功"}
+
+
+@app.post("/single")
+async def single(background_tasks: BackgroundTasks, item_id: str = Form()):
+    background_tasks.add_task(get_one_aweme,item_id)
     return {"message": "请求成功"}
 
 

@@ -37,15 +37,15 @@ def get_local_time(uid, path):
     t2 = 0
     file_name = query(f'file:{path}\\{uid}* depth:4')
     if file_name:
-        match = re.search(r'(\d*?)@', file_name)
+        match = re.search(r'^\d{14}', file_name)
         if match:
-            t = time.strptime(match.group(1), '%Y%m%d%H%M%S')
+            t = time.strptime(match.group(), '%Y%m%d%H%M%S')
             t1 = time.mktime(t)
     folder_name = query(f'folder:{path}\\{uid}* depth:4')
     if folder_name:
-        match = re.search(r'(\d*?)@', folder_name)
+        match = re.search(r'^\d{14}', folder_name)
         if match:
-            t = time.strptime(match.group(1), '%Y%m%d%H%M%S')
+            t = time.strptime(match.group(), '%Y%m%d%H%M%S')
             t2 = time.mktime(t)
     return max([t1, t2])
 
@@ -58,4 +58,4 @@ if __name__ == "__main__":
     # print(local('74953502089', 'E:\\迅雷云盘\\douyin'))
     # query('file:E:\\迅雷云盘\\douyin\\60625700486* depth:4')
     # query('folder:E:\\迅雷云盘\\douyin\\60625700486* depth:4')
-    print(get_local_time('60625700486', 'E:\\迅雷云盘\\douyin'))
+    print(get_local_time('2071959634709648', 'E:\\迅雷云盘\\douyin'))
