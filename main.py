@@ -112,7 +112,7 @@ async def general_exception_handler(request: Request, exc: Exception):
 
 def download(url, path, work_id):
     for i in range(3):
-        resp = requests.get(url, timeout=20, stream=True)
+        resp = requests.get(url, timeout=20, stream=True,headers=dy_headers)
         code = resp.status_code
         if code != 200:
             if code != 429:
@@ -155,7 +155,12 @@ async def handle_dy(sec_uid: str, max_cursor: str, db: Session = None):
     has_more = 1
     page = 0
     temp_time = 0
+    temp_cursor = -1
     while has_more == 1:
+        if temp_cursor == max_cursor:
+            logger.error("页码故障")
+            return
+        temp_cursor = max_cursor
         logger.info(f'{sec_uid}-{max_cursor}页开始下载:')
         post_params = xb.getXBogus(f'aid=6383&sec_user_id'
                                    f'={sec_uid}&count=20&max_cursor={max_cursor}&cookie_enabled=true'
@@ -431,7 +436,7 @@ async def root(background_tasks: BackgroundTasks, link: str = Form(), cursor: st
 
 @app.post("/single")
 async def single(background_tasks: BackgroundTasks, item_id: str = Form()):
-    background_tasks.add_task(get_one_aweme,item_id)
+    background_tasks.add_task(get_one_aweme, item_id)
     return {"message": "请求成功"}
 
 
