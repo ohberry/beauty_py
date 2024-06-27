@@ -1,23 +1,21 @@
+import csv
+import io
 import json
 import os
 import random
 import re
 import time
-
 import execjs
-from fastapi import FastAPI, BackgroundTasks, Form, Request, Depends
+from fastapi import FastAPI, BackgroundTasks, Form, Request, File
 from fastapi.responses import JSONResponse
 import uvicorn
-from sqlalchemy.orm import Session
-
-import database
 import utils
 from XB import XBogus
 from configobj import ConfigObj
 from loguru import logger
 import requests
 from datetime import datetime
-from models import History
+from tqdm import tqdm
 
 xb = XBogus()
 
@@ -25,6 +23,12 @@ ini = ConfigObj('conf.ini', encoding="UTF8")
 
 dy_headers = {
     'Cookie': ini['dyCookie'],
+    'Referer': 'https://www.douyin.com/',
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/104.0.0.0 '
+                  'Safari/537.36'
+}
+
+dy_download_headers = {
     'Referer': 'https://www.douyin.com/',
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/104.0.0.0 '
                   'Safari/537.36'
@@ -112,7 +116,7 @@ async def general_exception_handler(request: Request, exc: Exception):
 
 def download(url, path, work_id):
     for i in range(3):
-        resp = requests.get(url, timeout=20, stream=True,headers=dy_headers)
+        resp = requests.get(url, timeout=20, stream=True, headers=dy_download_headers)
         code = resp.status_code
         if code != 200:
             if code != 429:
@@ -132,7 +136,49 @@ def download(url, path, work_id):
         return
 
 
-async def handle_monitor_task(link: str, cursor: str = None, db: Session = None):
+def download_progress(url, path, work_id, file_ext):
+    for i in range(3):
+        resp = requests.get(url, timeout=20, stream=True, headers=dy_download_headers)
+        code = resp.status_code
+        if code != 200:
+            if code != 429:
+                raise Exception(f"下载请求异常，状态码: {resp.status_code}")
+            else:
+                if i == 2:
+                    raise Exception(f"下载请求异常，状态码: {resp.status_code}")
+                logger.error(f"第{i + 1}次尝试：等待2s后重试")
+                time.sleep(2)
+                continue
+            # 获取文件总大小
+        total_size = int(resp.headers.get('content-length', 0))
+        content_type = resp.headers.get('Content-Type')
+        if 'image/jpeg' in content_type:
+            file_ext = '.jpg'
+        elif 'image/png' in content_type:
+            file_ext = '.png'
+        elif 'image/webp' in content_type:
+            file_ext = '.webp'
+        elif 'video/mp4' in content_type:
+            file_ext = '.mp4'
+        file_path = f'{path}{file_ext}'
+        with open(file_path, 'wb') as f, tqdm(
+                desc=file_path,
+                total=total_size,
+                unit='iB',
+                unit_scale=True,
+                unit_divisor=1024,
+                colour='green'
+        ) as bar:
+            for chunk in resp.iter_content(chunk_size=8192):
+                if not chunk:
+                    break
+                size = f.write(chunk)
+                bar.update(size)
+        logger.info(f'have downloaded {url} 作品id：{work_id} {file_path}')
+        return
+
+
+async def handle_monitor_task(link: str, cursor: str = None):
     if link.find('douyin') != -1:
         match = re.search(r'(?<=user/)[\w|-]+', link)
         if not match:
@@ -141,17 +187,17 @@ async def handle_monitor_task(link: str, cursor: str = None, db: Session = None)
         sec_uid = match.group()
         if cursor is None:
             cursor = 0
-        await handle_dy(sec_uid, cursor, db)
+        await handle_dy(sec_uid, cursor)
     elif link.find('xiaohongshu') != -1:
         user_id = link.split('/')[-1]
         if cursor is None:
             cursor = ''
-        await handle_xhs(user_id, cursor, db)
+        await handle_xhs(user_id, cursor)
     else:
         logger.error(f'不支持的网站：{link}')
 
 
-async def handle_dy(sec_uid: str, max_cursor: str, db: Session = None):
+async def handle_dy(sec_uid, max_cursor):
     has_more = 1
     page = 0
     temp_time = 0
@@ -206,7 +252,8 @@ async def handle_dy(sec_uid: str, max_cursor: str, db: Session = None):
         if max_cursor == 0:
             try:
                 temp_time = utils.get_local_time(uid, ini['dyDownloadDir'])
-                logger.info(f'{sec_uid}-本地时间：{temp_time}')
+                temp_time_str = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(temp_time))
+                logger.info(f'{sec_uid}-本地时间：{temp_time_str}')
             except Exception as e:
                 logger.error(f'{sec_uid}-获取本地时间失败-{e}')
                 return
@@ -230,24 +277,12 @@ async def handle_dy(sec_uid: str, max_cursor: str, db: Session = None):
 
             if aweme_type in video_type:
                 video_url = aweme['video']['bit_rate'][0]['play_addr']['url_list'][0]
-
-                h = History()
-                h.platform = 'dy'
-                h.sec_uid = sec_uid
-                h.user_id = uid
-                h.work_id = aweme_id
-                h.create_time = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(create_time))
-                h.work_type = 'video'
-                h.url = video_url
                 save_path = os.path.join(base_path, f'{time_format}@{aweme_id}.mp4')
                 try:
                     download(video_url, save_path, aweme_id)
-                    h.status = 1
                 except Exception as e:
                     logger.error(f'{sec_uid}-{save_path} {video_url}下载视频失败，原因：{e}')
-                    h.status = 0
-                db.add(h)
-                db.commit()
+
 
             elif aweme_type in img_type:
                 img_path = os.path.join(base_path, f'{time_format}@{aweme_id}')
@@ -256,24 +291,11 @@ async def handle_dy(sec_uid: str, max_cursor: str, db: Session = None):
                 images = aweme['images']
                 for j, img in enumerate(images):
                     img_url = img['url_list'][0]
-                    h = History()
-                    h.platform = 'dy'
-                    h.sec_uid = sec_uid
-                    h.user_id = uid
-                    h.work_id = aweme_id
-                    h.create_time = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(create_time))
-                    h.work_type = 'img'
-                    h.url = img_url
-                    h.index = j
                     save_path = os.path.join(img_path, f'{j}.webp')
                     try:
                         download(img_url, save_path, aweme_id)
-                        h.status = 1
                     except Exception as e:
                         logger.error(f'{sec_uid}-{save_path}-{img_url}下载视频失败，原因：{e}')
-                        h.status = 0
-                    db.add(h)
-                    db.commit()
                     time.sleep(1)
 
             else:
@@ -284,7 +306,7 @@ async def handle_dy(sec_uid: str, max_cursor: str, db: Session = None):
     logger.info(f'{sec_uid}到底了')
 
 
-async def handle_xhs(user_id, cursor='', db: Session = None):
+async def handle_xhs(user_id, cursor=''):
     has_more = True
     while has_more:
         logger.info(f"{user_id}-{cursor}页 开始下载")
@@ -320,12 +342,12 @@ async def handle_xhs(user_id, cursor='', db: Session = None):
                     continue
                 logger.info(f"{user_id}-{cursor} 无新作品")
                 return
-            get_one_note(note_id, db)
+            get_one_note(note_id)
             time.sleep(5)
     logger.info(f"{user_id}-{cursor} 下载已完成")
 
 
-def get_one_note(note_id, db):
+def get_one_note(note_id):
     note_body['source_note_id'] = note_id
     data = json.dumps(note_body, separators=(',', ':'))
     ret = js.call('get_xs', '/api/sns/web/v1/feed', data, xhs_cookie['a1'])
@@ -352,22 +374,10 @@ def get_one_note(note_id, db):
     if note_type == 'video':
         origin_key = note['note_card']['video']['consumer']['origin_video_key']
         video_url = f'{random.choice(xhs_video_cdns)}/{origin_key}'
-
-        h = History()
-        h.platform = 'xhs'
-        h.user_id = user_id
-        h.work_id = note_id
-        h.create_time = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(upload_timestamp / 1000))
-        h.work_type = 'video'
-        h.url = video_url
         try:
             download(video_url, os.path.join(save_path, f'{upload_time_str}@{note_id}.mp4'), note_id)
-            h.status = 1
         except Exception as e:
             logger.error(f'{user_id}-{save_path}-{video_url}下载视频失败，原因：{e}')
-            h.status = 0
-        db.add(h)
-        db.commit()
 
     elif note_type == 'normal':
         images = note['note_card']['image_list']
@@ -376,24 +386,11 @@ def get_one_note(note_id, db):
             img_url = img['info_list'][0]['url']
             trace_id = img_url.split('/')[-1].split('!')[0]
             no_watermark_img_url = f'{random.choice(xhs_img_cdns)}/{trace_id}?imageView2/format/png'
-
-            h = History()
-            h.platform = 'xhs'
-            h.user_id = user_id
-            h.work_id = note_id
-            h.create_time = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(upload_timestamp / 1000))
-            h.work_type = 'img'
-            h.url = img_url
-            h.index = index
             try:
                 download(no_watermark_img_url, os.path.join(save_path, f'{upload_time_str}@{note_id}', f'{index}.png'),
                          note_id)
-                h.status = 1
             except Exception as e:
                 logger.error(f'{user_id}-{save_path}-{img_url}下载视频失败，原因：{e}')
-                h.status = 0
-            db.add(h)
-            db.commit()
 
     else:
         logger.error(f'笔记 {note_id} 类型未知')
@@ -427,10 +424,45 @@ def get_one_aweme(item_id):
     pass
 
 
+def parse_csv(content):
+    string_io = io.StringIO(content)
+    reader = csv.DictReader(string_io)
+    base_path = ini['dyDownloadDir']
+    for index, row in enumerate(reader):
+        print(row['作品描述'])
+        aweme_type = row['aweme_type']
+        sec_uid = row['sec_uid']
+        uid = row['uid']
+        nickname = row['nickname']
+        aweme_id = row['作品id']
+        if index == 0:
+            sub = sec_uid[-6:]
+            base_path = os.path.join(base_path, f'{uid}@{nickname}[{sub}]')
+            if not os.path.exists(base_path):
+                os.makedirs(base_path)
+
+        create_time = time.strptime(row['发布时间'], '%Y-%m-%d %H:%M:%S')
+        create_time = time.strftime('%Y%m%d%H%M%S', create_time)
+        if aweme_type == 'video':
+            url = row['下载链接']
+            download_path = os.path.join(base_path, f'{create_time}@{aweme_id}')
+            download_progress(url, download_path, aweme_id,'.mp4')
+        elif aweme_type == 'image':
+            download_folder = os.path.join(base_path, f'{create_time}@{aweme_id}')
+            if not os.path.exists(download_folder):
+                os.makedirs(download_folder)
+            number = row['序号']
+            url = row['下载链接']
+            download_path = os.path.join(download_folder, number)
+            download_progress(url, download_path, aweme_id, '.webp')
+        else:
+            logger.error(f'type: {aweme_type} is not supported')
+    logger.info("All have been completed.")
+
+
 @app.post("/")
-async def root(background_tasks: BackgroundTasks, link: str = Form(), cursor: str = Form(None),
-               db: Session = Depends(database.get_db)):
-    background_tasks.add_task(handle_monitor_task, link, cursor, db)
+async def root(background_tasks: BackgroundTasks, link: str = Form(), cursor: str = Form(None)):
+    background_tasks.add_task(handle_monitor_task, link, cursor)
     return {"message": "请求成功"}
 
 
@@ -440,6 +472,17 @@ async def single(background_tasks: BackgroundTasks, item_id: str = Form()):
     return {"message": "请求成功"}
 
 
+@app.post("/batch")
+async def batch(background_tasks: BackgroundTasks, file: bytes = File()):
+    content = file.decode('utf-8')
+    background_tasks.add_task(parse_csv, content)
+    return {"message": "请求成功"}
+
+
 if __name__ == "__main__":
-    uvicorn.run("main:app", host="0.0.0.0", port=8899, reload=False)
-# 如果修改过dy号short_id就会更为为你修改的号码，unique_id为你的dy初始值，uid是相当于用户的身份证唯一码
+    # uvicorn.run("main:app", host="0.0.0.0", port=8899, reload=False)
+    download_progress('https://github.com/Eugeny/tabby/releases/download/v1.0.208/tabby-1.0.208-linux-arm64.AppImage',
+                      'F:/tabby-1.0.208-linux-arm64', '1234567890', '.AppImage')
+    download_progress(
+        'https://github.com/Eugeny/tabby/releases/download/v1.0.208/tabby-1.0.208-macos-arm64.dmg.blockmap',
+        'F:/tabby-1.0.208-macos-arm64.dmg', '1234567890', '.blockmap')
