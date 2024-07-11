@@ -34,25 +34,18 @@ dy_download_headers = {
                   'Safari/537.36'
 }
 
-js = execjs.compile(open(r'./xhs.js', 'r', encoding='utf-8').read())
+js = execjs.compile(open(r'./info.js', 'r', encoding='utf-8').read())
 
 xhs_headers = {
+    "authority": "edith.xiaohongshu.com",
     "accept": "application/json, text/plain, */*",
-    "accept-language": "zh-CN,zh;q=0.9,en;q=0.8",
-    "cache-control": "no-cache",
+    "accept-language": "zh-CN,zh;q=0.9,en;q=0.8,en-GB;q=0.7,en-US;q=0.6",
     "content-type": "application/json;charset=UTF-8",
-    "dnt": "1",
     "origin": "https://www.xiaohongshu.com",
-    "pragma": "no-cache",
-    "priority": "u=1, i",
     "referer": "https://www.xiaohongshu.com/",
-    "sec-ch-ua": '"Google Chrome";v="125", "Chromium";v="125", "Not.A/Brand";v="24"',
-    "sec-ch-ua-mobile": "?0",
-    "sec-ch-ua-platform": '"macOS"',
-    "sec-fetch-dest": "empty",
-    "sec-fetch-mode": "cors",
-    "sec-fetch-site": "same-site",
-    "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+    "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "x-s": "",
+    "x-t": "",
 }
 
 page_params = {
@@ -83,7 +76,7 @@ xhs_video_cdns = [
     "https://sns-video-qn.xhscdn.com",
 ]
 
-xhs_post_url = 'https://edith.xiaohongshu.com'
+more_url = 'https://edith.xiaohongshu.com/api/sns/web/v1/user_posted'
 
 # 抖音作品类型
 video_type = (0, 4, 51, 53, 55, 58, 61, 66, 109)
@@ -184,47 +177,6 @@ def download_progress(url, path, work_id, file_ext):
         # logger.info(f'have downloaded {url} 作品id：{work_id} {file_path}')
         return
 
-
-def download_progress2(url, path, work_id, file_ext):
-    for i in range(3):
-        resp = requests.get(url, timeout=20, stream=True)
-        code = resp.status_code
-        if code != 200:
-            if code != 429:
-                raise Exception(f"下载请求异常，状态码: {resp.status_code}")
-            else:
-                if i == 2:
-                    raise Exception(f"下载请求异常，状态码: {resp.status_code}")
-                logger.error(f"第{i + 1}次尝试：等待2s后重试")
-                time.sleep(2)
-                continue
-            # 获取文件总大小
-        total_size = int(resp.headers.get('content-length', 0))
-        content_type = resp.headers.get('Content-Type')
-        if 'image/jpeg' in content_type:
-            file_ext = '.jpg'
-        elif 'image/png' in content_type:
-            file_ext = '.png'
-        elif 'image/webp' in content_type:
-            file_ext = '.webp'
-        elif 'video/mp4' in content_type:
-            file_ext = '.mp4'
-        file_path = f'{path}{file_ext}'
-        with open(file_path, 'wb') as f, tqdm(
-                desc=file_path,
-                total=total_size,
-                unit='iB',
-                unit_scale=True,
-                unit_divisor=1024,
-                colour='green'
-        ) as bar:
-            for chunk in resp.iter_content(chunk_size=8192):
-                if not chunk:
-                    break
-                size = f.write(chunk)
-                bar.update(size)
-        # logger.info(f'have downloaded {url} 作品id：{work_id} {file_path}')
-        return
 
 async def handle_monitor_task(link: str, cursor: str = None):
     if link.find('douyin') != -1:
@@ -328,7 +280,7 @@ async def handle_dy(sec_uid, max_cursor):
                 save_path = os.path.join(base_path, f'{time_format}@{aweme_id}')
                 try:
                     # download(video_url, save_path, aweme_id)
-                    download_progress(video_url, save_path, aweme_id, '.mp4')
+                    download_progress(video_url, save_path, aweme_id,'.mp4')
                 except Exception as e:
                     logger.error(f'{sec_uid}-{save_path} {video_url}下载视频失败，原因：{e}')
 
@@ -343,7 +295,7 @@ async def handle_dy(sec_uid, max_cursor):
                     save_path = os.path.join(img_path, f'{j}')
                     try:
                         # download(img_url, save_path, aweme_id)
-                        download_progress(img_url, save_path, aweme_id, '.webp')
+                        download_progress(img_url, save_path, aweme_id,'.webp')
                     except Exception as e:
                         logger.error(f'{sec_uid}-{save_path}-{img_url}下载视频失败，原因：{e}')
                     time.sleep(1)
@@ -357,16 +309,16 @@ async def handle_dy(sec_uid, max_cursor):
 
 
 async def handle_xhs(user_id, cursor=''):
-    headers = {'cookie': ini["xhsCookie"]}
-    headers.update(xhs_headers)
     has_more = True
     while has_more:
         logger.info(f"{user_id}-{cursor}页 开始下载")
-        api = f"/api/sns/web/v1/user_posted?num=30&cursor={cursor}&user_id={user_id}&image_formats=jpg,webp,avif&id=1"
-        ret = js.call('sign', api, None, ini["xhsCookie"])
-        headers.update(ret)
+        api = f"/api/sns/web/v1/user_posted?num=30&cursor={cursor}&user_id={user_id}&image_scenes="
+        ret = js.call('get_xs', api, '', xhs_cookie['a1'])
+        xhs_headers['x-s'], xhs_headers['x-t'] = ret['X-s'], str(ret['X-t'])
+        page_params['user_id'] = user_id
+        page_params['cursor'] = cursor
 
-        res = requests.get(f'{xhs_post_url}{api}', headers=headers)
+        res = requests.get(more_url, params=page_params, headers=xhs_headers, cookies=xhs_cookie)
         if res.status_code != 200:
             logger.error(f"{user_id} 请求分页数据 Unexpected status code: {res.status_code}")
             return
@@ -398,15 +350,13 @@ async def handle_xhs(user_id, cursor=''):
 
 
 def get_one_note(note_id):
-    params = {"source_note_id": note_id, "image_formats": [
-        "jpg", "webp", "avif"], "extra": {"need_body_topic": "1"}}
-    headers = {'cookie': ini['xhsCookie']}
-    headers.update(xhs_headers)
-    ret = js.call('sign', '/api/sns/web/v1/feed', params, ini['xhsCookie'])
-    data = json.dumps(params, separators=(',', ':'), ensure_ascii=False)
-    headers.update(ret)
+    note_body['source_note_id'] = note_id
+    data = json.dumps(note_body, separators=(',', ':'))
+    ret = js.call('get_xs', '/api/sns/web/v1/feed', data, xhs_cookie['a1'])
+    xhs_headers['x-s'], xhs_headers['x-t'] = ret['X-s'], str(ret['X-t'])
     try:
-        response = requests.post('https://edith.xiaohongshu.com/api/sns/web/v1/feed', headers=headers,
+        response = requests.post('https://edith.xiaohongshu.com/api/sns/web/v1/feed', headers=xhs_headers,
+                                 cookies=xhs_cookie,
                                  data=data)
         note_info = response.json()
         note = note_info['data']['items'][0]
@@ -427,7 +377,7 @@ def get_one_note(note_id):
         origin_key = note['note_card']['video']['consumer']['origin_video_key']
         video_url = f'{random.choice(xhs_video_cdns)}/{origin_key}'
         try:
-            download_progress2(video_url, os.path.join(save_path, f'{upload_time_str}@{note_id}'), note_id, ".mp4")
+            download(video_url, os.path.join(save_path, f'{upload_time_str}@{note_id}.mp4'), note_id)
         except Exception as e:
             logger.error(f'{user_id}-{save_path}-{video_url}下载视频失败，原因：{e}')
 
@@ -439,8 +389,8 @@ def get_one_note(note_id):
             trace_id = img_url.split('/')[-1].split('!')[0]
             no_watermark_img_url = f'{random.choice(xhs_img_cdns)}/{trace_id}?imageView2/format/png'
             try:
-                download_progress2(no_watermark_img_url, os.path.join(save_path, f'{upload_time_str}@{note_id}', f'{index}'),
-                         note_id,".png")
+                download(no_watermark_img_url, os.path.join(save_path, f'{upload_time_str}@{note_id}', f'{index}.png'),
+                         note_id)
             except Exception as e:
                 logger.error(f'{user_id}-{save_path}-{img_url}下载视频失败，原因：{e}')
 
@@ -497,7 +447,7 @@ def parse_csv(content):
         if aweme_type == 'video':
             url = row['下载链接']
             download_path = os.path.join(base_path, f'{create_time}@{aweme_id}')
-            download_progress(url, download_path, aweme_id, '.mp4')
+            download_progress(url, download_path, aweme_id,'.mp4')
         elif aweme_type == 'image':
             download_folder = os.path.join(base_path, f'{create_time}@{aweme_id}')
             if not os.path.exists(download_folder):
