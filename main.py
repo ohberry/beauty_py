@@ -36,7 +36,7 @@ dy_download_headers = {
 
 js = execjs.compile(open(r'./xhs.js', 'r', encoding='utf-8').read())
 
-xhs_headers = {
+xhs_common_headers = {
     "accept": "application/json, text/plain, */*",
     "accept-language": "zh-CN,zh;q=0.9,en;q=0.8",
     "cache-control": "no-cache",
@@ -143,9 +143,9 @@ def download(url, path, work_id):
         return
 
 
-def download_progress(url, path, work_id, file_ext):
+def download_progress(url, path, file_ext, headers=None):
     for i in range(3):
-        resp = requests.get(url, timeout=20, stream=True, headers=dy_download_headers)
+        resp = requests.get(url, timeout=20, stream=True, headers=headers)
         code = resp.status_code
         if code != 200:
             if code != 429:
@@ -181,50 +181,8 @@ def download_progress(url, path, work_id, file_ext):
                     break
                 size = f.write(chunk)
                 bar.update(size)
-        # logger.info(f'have downloaded {url} 作品id：{work_id} {file_path}')
         return
 
-
-def download_progress2(url, path, work_id, file_ext):
-    for i in range(3):
-        resp = requests.get(url, timeout=20, stream=True)
-        code = resp.status_code
-        if code != 200:
-            if code != 429:
-                raise Exception(f"下载请求异常，状态码: {resp.status_code}")
-            else:
-                if i == 2:
-                    raise Exception(f"下载请求异常，状态码: {resp.status_code}")
-                logger.error(f"第{i + 1}次尝试：等待2s后重试")
-                time.sleep(2)
-                continue
-            # 获取文件总大小
-        total_size = int(resp.headers.get('content-length', 0))
-        content_type = resp.headers.get('Content-Type')
-        if 'image/jpeg' in content_type:
-            file_ext = '.jpg'
-        elif 'image/png' in content_type:
-            file_ext = '.png'
-        elif 'image/webp' in content_type:
-            file_ext = '.webp'
-        elif 'video/mp4' in content_type:
-            file_ext = '.mp4'
-        file_path = f'{path}{file_ext}'
-        with open(file_path, 'wb') as f, tqdm(
-                desc=file_path,
-                total=total_size,
-                unit='iB',
-                unit_scale=True,
-                unit_divisor=1024,
-                colour='green'
-        ) as bar:
-            for chunk in resp.iter_content(chunk_size=8192):
-                if not chunk:
-                    break
-                size = f.write(chunk)
-                bar.update(size)
-        # logger.info(f'have downloaded {url} 作品id：{work_id} {file_path}')
-        return
 
 async def handle_monitor_task(link: str, cursor: str = None):
     if link.find('douyin') != -1:
@@ -252,7 +210,7 @@ async def handle_dy(sec_uid, max_cursor):
     temp_cursor = -1
     while has_more == 1:
         if temp_cursor == max_cursor:
-            logger.error("页码故障")
+            logger.error("页码重复")
             return
         temp_cursor = max_cursor
         logger.info(f'{sec_uid}-{max_cursor}页开始下载:')
@@ -328,7 +286,7 @@ async def handle_dy(sec_uid, max_cursor):
                 save_path = os.path.join(base_path, f'{time_format}@{aweme_id}')
                 try:
                     # download(video_url, save_path, aweme_id)
-                    download_progress(video_url, save_path, aweme_id, '.mp4')
+                    download_progress(video_url, save_path, '.mp4', dy_download_headers)
                 except Exception as e:
                     logger.error(f'{sec_uid}-{save_path} {video_url}下载视频失败，原因：{e}')
 
@@ -343,7 +301,7 @@ async def handle_dy(sec_uid, max_cursor):
                     save_path = os.path.join(img_path, f'{j}')
                     try:
                         # download(img_url, save_path, aweme_id)
-                        download_progress(img_url, save_path, aweme_id, '.webp')
+                        download_progress(img_url, save_path, '.webp', dy_download_headers)
                     except Exception as e:
                         logger.error(f'{sec_uid}-{save_path}-{img_url}下载视频失败，原因：{e}')
                     time.sleep(1)
@@ -358,7 +316,7 @@ async def handle_dy(sec_uid, max_cursor):
 
 async def handle_xhs(user_id, cursor=''):
     headers = {'cookie': ini["xhsCookie"]}
-    headers.update(xhs_headers)
+    headers.update(xhs_common_headers)
     has_more = True
     while has_more:
         logger.info(f"{user_id}-{cursor}页 开始下载")
@@ -379,7 +337,7 @@ async def handle_xhs(user_id, cursor=''):
         cursor = page_info['data']['cursor']
         notes = page_info['data']['notes']
         if not notes:
-            time.sleep(5)
+            time.sleep(2)
             logger.info(f"{user_id}-{cursor} 该页无作品")
             continue
         nickname = notes[0]['user']['nickname']
@@ -393,7 +351,7 @@ async def handle_xhs(user_id, cursor=''):
                 logger.info(f"{user_id}-{cursor} 无新作品")
                 return
             get_one_note(note_id)
-            time.sleep(5)
+            time.sleep(2)
     logger.info(f"{user_id}-{cursor} 下载已完成")
 
 
@@ -401,7 +359,7 @@ def get_one_note(note_id):
     params = {"source_note_id": note_id, "image_formats": [
         "jpg", "webp", "avif"], "extra": {"need_body_topic": "1"}}
     headers = {'cookie': ini['xhsCookie']}
-    headers.update(xhs_headers)
+    headers.update(xhs_common_headers)
     ret = js.call('sign', '/api/sns/web/v1/feed', params, ini['xhsCookie'])
     data = json.dumps(params, separators=(',', ':'), ensure_ascii=False)
     headers.update(ret)
@@ -427,7 +385,7 @@ def get_one_note(note_id):
         origin_key = note['note_card']['video']['consumer']['origin_video_key']
         video_url = f'{random.choice(xhs_video_cdns)}/{origin_key}'
         try:
-            download_progress2(video_url, os.path.join(save_path, f'{upload_time_str}@{note_id}'), note_id, ".mp4")
+            download_progress(video_url, os.path.join(save_path, f'{upload_time_str}@{note_id}'), ".mp4")
         except Exception as e:
             logger.error(f'{user_id}-{save_path}-{video_url}下载视频失败，原因：{e}')
 
@@ -439,8 +397,9 @@ def get_one_note(note_id):
             trace_id = img_url.split('/')[-1].split('!')[0]
             no_watermark_img_url = f'{random.choice(xhs_img_cdns)}/{trace_id}?imageView2/format/png'
             try:
-                download_progress2(no_watermark_img_url, os.path.join(save_path, f'{upload_time_str}@{note_id}', f'{index}'),
-                         note_id,".png")
+                download_progress(no_watermark_img_url,
+                                  os.path.join(save_path, f'{upload_time_str}@{note_id}', f'{index}'),
+                                  ".png")
             except Exception as e:
                 logger.error(f'{user_id}-{save_path}-{img_url}下载视频失败，原因：{e}')
 
