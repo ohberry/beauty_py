@@ -4,9 +4,9 @@
 a = Analysis(
     ['main.py'],
     pathex=[],
-    binaries=[],
-    datas=[],
-    hiddenimports=[],
+    binaries=[('lib/*.dll', '.')],
+    datas=[('lib', 'lib')],
+    hiddenimports=['main.py'],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

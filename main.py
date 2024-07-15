@@ -4,6 +4,7 @@ import json
 import os
 import random
 import re
+import sys
 import time
 import execjs
 from fastapi import FastAPI, BackgroundTasks, Form, Request, File
@@ -16,6 +17,11 @@ from loguru import logger
 import requests
 from datetime import datetime
 from tqdm import tqdm
+from path import Path
+
+root_path = os.getcwd()
+# print(root_path)
+sys.path.append(root_path)
 
 xb = XBogus()
 
@@ -491,3 +497,5 @@ async def batch(background_tasks: BackgroundTasks, file: bytes = File()):
 
 if __name__ == "__main__":
     uvicorn.run("main:app", host="0.0.0.0", port=8899, reload=False)
+    # name_app = os.path.basename(__file__)[0:-3]
+    # uvicorn.run(f"{Path(__file__).stem}:app", host="0.0.0.0", port=8899, reload=False)
