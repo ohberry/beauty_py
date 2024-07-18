@@ -11,32 +11,63 @@ from fastapi import FastAPI, BackgroundTasks, Form, Request, File
 from fastapi.responses import JSONResponse
 import uvicorn
 import utils
-from XB import XBogus
+from xbogus import XBogus
 from configobj import ConfigObj
 from loguru import logger
 import requests
 from datetime import datetime
 from tqdm import tqdm
+import urllib.parse
+from abogus import ABogus, BrowserFingerprintGenerator
 
 root_path = os.getcwd()
 # print(root_path)
 sys.path.append(root_path)
-
-xb = XBogus()
 
 ini = ConfigObj('conf.ini', encoding="UTF8")
 
 dy_headers = {
     'Cookie': ini['dyCookie'],
     'Referer': 'https://www.douyin.com/',
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/104.0.0.0 '
-                  'Safari/537.36'
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36 Edg/122.0.0.0'
 }
+
+xb = XBogus(dy_headers['User-Agent'])
+browser_fp = BrowserFingerprintGenerator.generate_fingerprint("Edge")
+abogus = ABogus(user_agent=dy_headers['User-Agent'], fp=browser_fp)
 
 dy_download_headers = {
     'Referer': 'https://www.douyin.com/',
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/104.0.0.0 '
                   'Safari/537.36'
+}
+
+dy_post_params = {
+    "device_platform": "webapp",
+    "aid": "6383",
+    "channel": "channel_pc_web",
+    "pc_client_type": 1,
+    "version_code": "190500",
+    "version_name": "19.5.0",
+    "cookie_enabled": "true",
+    "screen_width": 1920,
+    "screen_height": 1080,
+    "browser_language": "zh-CN",
+    "browser_platform": "Win32",
+    "browser_name": "Edge",
+    "browser_version": "122.0.0.0",
+    "browser_online": "true",
+    "engine_name": "Blink",
+    "engine_version": "122.0.0.0",
+    "os_name": "Windows",
+    "os_version": "10",
+    "cpu_core_num": 12,
+    "device_memory": 8,
+    "platform": "PC",
+    "downlink": "10",
+    "effective_type": "4g",
+    "round_trip_time": 100,
+    "webid": "7333282344759494196",
 }
 
 js = execjs.compile(open(r'./xhs.js', 'r', encoding='utf-8').read())
@@ -219,12 +250,15 @@ async def handle_dy(sec_uid, max_cursor):
             return
         temp_cursor = max_cursor
         logger.info(f'{sec_uid}-{max_cursor}页开始下载:')
-        post_params = xb.getXBogus(f'aid=6383&sec_user_id'
-                                   f'={sec_uid}&count=20&max_cursor={max_cursor}&cookie_enabled=true'
-                                   '&platform=PC&downlink=10')
+        post_params = {"msToken": get_mstoken(), "sec_user_id": sec_uid, "max_cursor": max_cursor}
+        post_params.update(dy_post_params)
+        query = '&'.join([f'{k}={v}' for k, v in post_params.items()])
+        xbogus = xb.getXBogus(query)
+
+        query_params = xbogus[0]
         response = None
         for i in range(3):
-            response = requests.get(f'https://www.douyin.com/aweme/v1/web/aweme/post/?{post_params}',
+            response = requests.get(f'https://www.douyin.com/aweme/v1/web/aweme/post/?{query_params}',
                                     headers=dy_headers)
             if response.status_code == 429:
                 if i < 2:
@@ -317,6 +351,11 @@ async def handle_dy(sec_uid, max_cursor):
             time.sleep(2)
         page += 1
     logger.info(f'{sec_uid}到底了')
+
+
+def get_mstoken():
+    base_str = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+-'
+    return "".join(random.choice(base_str) for _ in range(126)) + '=='
 
 
 async def handle_xhs(user_id, cursor=''):
@@ -413,7 +452,11 @@ def get_one_note(note_id):
 
 
 def get_one_aweme(item_id):
-    params = xb.getXBogus(f'aweme_id={item_id}&aid=1128&version_name=23.5.0&device_platform=android&os_version=2333')
+    post_params = {"aweme_id": item_id, "msToken": get_mstoken()}
+    post_params.update(dy_post_params)
+    query = '&'.join([f'{k}={urllib.parse.quote(str(v))}' for k, v in post_params.items()])
+    ab = abogus.generate_abogus(query, "GET")
+    params = ab[0]
     resp = requests.get(f'https://www.douyin.com/aweme/v1/web/aweme/detail/?{params}', headers=dy_headers)
     info_json = resp.json()
     nickname = info_json['aweme_detail']['author']['nickname']
@@ -495,6 +538,6 @@ async def batch(background_tasks: BackgroundTasks, file: bytes = File()):
 
 
 if __name__ == "__main__":
-    uvicorn.run("main:app", host="0.0.0.0", port=8899, reload=False)
+    uvicorn.run("main2:app", host="0.0.0.0", port=8899, reload=False)
     # name_app = os.path.basename(__file__)[0:-3]
     # uvicorn.run(f"{Path(__file__).stem}:app", host="0.0.0.0", port=8899, reload=False)
