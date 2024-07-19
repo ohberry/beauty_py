@@ -452,7 +452,12 @@ def get_one_note(note_id):
 
 
 def get_one_aweme(item_id):
-    post_params = {"aweme_id": item_id, "msToken": get_mstoken()}
+    cookie_dict = cookie_to_dict(ini['dyCookie'])
+    post_params = {s
+        "msToken": get_mstoken(),
+        "verifyFp": cookie_dict['s_v_web_id'],
+        "fp":cookie_dict['s_v_web_id']
+    }
     post_params.update(dy_post_params)
     query = '&'.join([f'{k}={urllib.parse.quote(str(v))}' for k, v in post_params.items()])
     ab = abogus.generate_abogus(query, "GET")
