@@ -400,10 +400,19 @@ async def handle_xhs(user_id, cursor=''):
 
 
 def get_one_note(note_id):
-    params = {"source_note_id": note_id, "image_formats": [
-        "jpg", "webp", "avif"], "extra": {"need_body_topic": "1"}}
     headers = {'cookie': ini['xhsCookie']}
     headers.update(xhs_common_headers)
+    resp =requests.get("https://www.xiaohongshu.com/explore", headers=headers)
+    if resp.status_code != 200 or resp.text == '':
+        return {}, False
+    pattern = r'xsec_token=(.*?)&'
+    match = re.search(pattern, resp.text)
+    if not match:
+        logger.error("No xsec_token match found.")
+        return {}, False
+    xsec_token = match.group(1)
+    params = {"source_note_id": note_id, "image_formats": [
+        "jpg", "webp", "avif"], "extra": {"need_body_topic": "1"}, "xsec_source": "pc_feed", "xsec_token": xsec_token}
     ret = js.call('sign', '/api/sns/web/v1/feed', params, ini['xhsCookie'])
     data = json.dumps(params, separators=(',', ':'), ensure_ascii=False)
     headers.update(ret)
